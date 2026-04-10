@@ -61,7 +61,7 @@ else:
             st.session_state['auth'] = False
             st.rerun()
 
-    # Sickness Alert
+    # Sickness Alert (Employee Side)
     os = db.table("bookings").select("*").eq("employee_id", mid).eq("leave_type", "Sickness").eq("sickness_closed_by_emp", False).execute()
     if os.data:
         st.warning(f"⚠️ Sickness Active (Started: {os.data[0]['start_date']})")
@@ -87,7 +87,6 @@ else:
         m_cols[1].metric("Purchased", f"{(float(p_pot['total_purchased']) - float(p_pot['amount_used'])) * mult} {unit}")
         
         if role == "Office":
-            # Calculate weekly-only flexi balance
             today = datetime.now().date()
             start_of_week = today - timedelta(days=today.weekday())
             w_flex = db.table("flexi_logs").select("hours_worked").eq("employee_id", mid).gte("date", str(start_of_week)).execute()
@@ -97,7 +96,7 @@ else:
         st.divider()
         st.subheader("Recent Activity")
         recent = db.table("bookings").select("*").eq("employee_id", mid).order("id", desc=True).limit(5).execute()
-        if recent.data: st.table(pd.DataFrame(recent.data)[['start_date', 'leave_type', 'status', 'day_type']])
+        if recent.data: st.table(pd.DataFrame(recent.data)[['start_date', 'leave_type', 'status']])
 
     with tabs[1]: # REQUEST LEAVE
         st.subheader("Book New Leave")
@@ -152,45 +151,53 @@ else:
             st.metric("Today's Change", f"{wk_h-7.5:+.2f}h")
             if st.button("Save to Log"):
                 db.table("flexi_logs").insert({"employee_id": mid, "date": str(datetime.now().date()), "hours_worked": wk_h-7.5, "start_time": str(st_t), "end_time": str(en_t)}).execute()
-                # Update main balance for legacy purposes, though dashboard now uses real-time calc
                 db.table("employees").update({"flexi_balance": float(u.get('flexi_balance', 0)) + (wk_h-7.5)}).eq("employee_id", mid).execute()
                 st.rerun()
-            
-            st.divider()
-            st.subheader("Weekly Tracker")
-            all_flex = db.table("flexi_logs").select("*").eq("employee_id", mid).execute().data
-            if all_flex:
-                df_f = pd.DataFrame(all_flex)
-                df_f['date'] = pd.to_datetime(df_f['date'])
-                df_f['Week Starting'] = df_f['date'].apply(lambda x: x - timedelta(days=x.weekday()))
-                weekly_summary = df_f.groupby('Week Starting')['hours_worked'].sum().reset_index()
-                weekly_summary.columns = ['Week Starting', 'Total Flexi (h)']
-                st.table(weekly_summary.sort_values('Week Starting', ascending=False))
 
     if reports_res.data:
         with tabs[-1]: # TEAM MANAGEMENT
-            # ... Approvals and Sickness logic remains same as per previous version ...
             r_l = reports_res.data
             r_ids = [str(r['employee_id']) for r in r_l]
             cl, cr = st.columns(2)
             with cl:
                 st.subheader("Approvals")
                 pen = db.table("bookings").select("*").in_("employee_id", r_ids).eq("status", "Pending").neq("leave_type", "Sickness").execute().data
+                if not pen: st.info("No pending requests.")
                 for p in pen:
                     nm = next(r['full_name'] for r in r_l if str(r['employee_id']) == str(p['employee_id']))
-                    st.info(f"{nm}: {p['start_date']}")
-                    if st.button("Approve", key=f"a{p['id']}"):
-                        rep_r = next(r for r in r_l if str(r['employee_id']) == str(p['employee_id']))
-                        h = calc_deduct(datetime.strptime(p['start_date'],"%Y-%m-%d"), datetime.strptime(p['end_date'],"%Y-%m-%d"), p['day_type'], rep_r['role'])
-                        f_u = (h/7.5) if rep_r['role'] == "Factory" else h
-                        if p['leave_type'] == "Purchased Holiday":
-                            p_rec = db.table("purchased_leave").select("*").eq("employee_id", p['employee_id']).eq("year", p['holiday_year']).execute().data[0]
-                            db.table("purchased_leave").update({"amount_used": float(p_rec['amount_used']) + f_u}).eq("id", p_rec['id']).execute()
-                        elif p['leave_type'] == "Annual Leave":
-                            old_b = db.table("employees").select("contractual_allowance").eq("employee_id", p['employee_id']).execute().data[0]['contractual_allowance']
-                            db.table("employees").update({"contractual_allowance": float(old_b)-f_u}).eq("employee_id", p['employee_id']).execute()
-                        db.table("bookings").update({"status": "Approved"}).eq("id", p['id']).execute()
-                        st.rerun()
+                    rep_r = next(r for r in r_l if str(r['employee_id']) == str(p['employee_id']))
+                    h_impact = calc_deduct(datetime.strptime(p['start_date'],"%Y-%m-%d"), datetime.strptime(p['end_date'],"%Y-%m-%d"), p['day_type'], rep_r['role'])
+                    u_label = "Hours" if rep_r['role'] == "Factory" else "Days"
+                    
+                    with st.expander(f"📌 {nm}: {p['start_date']}", expanded=True):
+                        st.write(f"**Impact:** {h_impact} {u_label} ({p['leave_type']})")
+                        b1, b2 = st.columns(2)
+                        if b1.button("Approve", key=f"a{p['id']}", type="primary"):
+                            f_u = (h_impact/7.5) if rep_r['role'] == "Factory" else h_impact
+                            if p['leave_type'] == "Purchased Holiday":
+                                p_rec = db.table("purchased_leave").select("*").eq("employee_id", p['employee_id']).eq("year", p['holiday_year']).execute().data[0]
+                                db.table("purchased_leave").update({"amount_used": float(p_rec['amount_used']) + f_u}).eq("id", p_rec['id']).execute()
+                            elif p['leave_type'] == "Annual Leave":
+                                old_b = db.table("employees").select("contractual_allowance").eq("employee_id", p['employee_id']).execute().data[0]['contractual_allowance']
+                                db.table("employees").update({"contractual_allowance": float(old_b)-f_u}).eq("employee_id", p['employee_id']).execute()
+                            db.table("bookings").update({"status": "Approved"}).eq("id", p['id']).execute()
+                            st.rerun()
+                        if b2.button("Reject", key=f"r{p['id']}"):
+                            db.table("bookings").update({"status": "Rejected"}).eq("id", p['id']).execute()
+                            st.rerun()
             with cr:
-                st.subheader("Sickness")
-                # ... Sickness logic remains same ...
+                st.subheader("Sickness Management")
+                tr = st.selectbox("Log Sickness For:", [r['full_name'] for r in r_l])
+                if st.button("Log Sickness Start"):
+                    rid = next(r['employee_id'] for r in r_l if r['full_name'] == tr)
+                    db.table("bookings").insert({"employee_id": rid, "start_date": str(datetime.now().date()), "leave_type": "Sickness", "status": "Approved", "sickness_closed_by_emp": False, "rtw_completed": False}).execute()
+                    st.rerun()
+                
+                st.divider()
+                st.write("**RTW Interviews Required:**")
+                rtw_data = db.table("bookings").select("*").in_("employee_id", r_ids).eq("leave_type", "Sickness").eq("sickness_closed_by_emp", True).eq("rtw_completed", False).execute().data
+                for s in rtw_data:
+                    sn = next(r['full_name'] for r in r_l if str(r['employee_id']) == str(s['employee_id']))
+                    if st.button(f"Mark RTW Complete: {sn}", key=f"s{s['id']}"):
+                        db.table("bookings").update({"rtw_completed": True}).eq("id", s['id']).execute()
+                        st.rerun()
