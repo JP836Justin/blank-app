@@ -61,14 +61,21 @@ else:
             st.session_state['auth'] = False
             st.rerun()
 
-    # Sickness Alert (Employee Side)
-    os = db.table("bookings").select("*").eq("employee_id", mid).eq("leave_type", "Sickness").eq("sickness_closed_by_emp", False).execute()
-    if os.data:
-        st.warning(f"⚠️ Sickness Active (Started: {os.data[0]['start_date']})")
-        if st.button("I have returned to work today"):
-            db.table("bookings").update({"end_date": str(datetime.now().date()), "sickness_closed_by_emp": True}).eq("id", os.data[0]['id']).execute()
+    # --- SICKNESS ALERT (The Missing Link) ---
+    # This checks for an open sickness record for the LOGGED IN user
+    open_sickness = db.table("bookings").select("*").eq("employee_id", mid).eq("leave_type", "Sickness").eq("sickness_closed_by_emp", False).execute()
+    
+    if open_sickness.data:
+        st.error(f"⚠️ **Sickness Absence Active** (Started: {open_sickness.data[0]['start_date']})")
+        if st.button("I have returned to work today", type="primary"):
+            db.table("bookings").update({
+                "end_date": str(datetime.now().date()), 
+                "sickness_closed_by_emp": True
+            }).eq("id", open_sickness.data[0]['id']).execute()
+            st.success("Welcome back! Your manager has been notified for your RTW interview.")
             st.rerun()
 
+    # Tab Setup
     reports_res = db.table("employees").select("employee_id, full_name, role").eq("manager_id", mid).execute()
     t_titles = ["Dashboard", "Request Leave", "Calendar"]
     if role == "Office": t_titles.append("Flexi-Time")
@@ -96,7 +103,7 @@ else:
         st.divider()
         st.subheader("Recent Activity")
         recent = db.table("bookings").select("*").eq("employee_id", mid).order("id", desc=True).limit(5).execute()
-        if recent.data: st.table(pd.DataFrame(recent.data)[['start_date', 'leave_type', 'status']])
+        if recent.data: st.table(pd.DataFrame(recent.data)[['start_date', 'leave_type', 'status', 'day_type']])
 
     with tabs[1]: # REQUEST LEAVE
         st.subheader("Book New Leave")
